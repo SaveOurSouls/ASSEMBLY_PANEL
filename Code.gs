@@ -297,34 +297,75 @@ function mapRequiredColumns_(headerRow, requiredHeaders) {
 function extractMatrixByHeaders_(sheet, rowsCount, colMap, headers) {
   const matrix = new Array(rowsCount);
   for (let row = 0; row < rowsCount; row++) matrix[row] = new Array(headers.length);
-  for (let colIdx = 0; colIdx < headers.length; colIdx++) {
-    const colName = headers[colIdx];
-    const values = sheet.getRange(2, colMap[colName] + 1, rowsCount, 1).getValues();
+  const groups = buildColumnGroups_(colMap, headers);
+  for (let g = 0; g < groups.length; g++) {
+    const group = groups[g];
+    const values = sheet.getRange(2, group.startCol + 1, rowsCount, group.headers.length).getValues();
     for (let row = 0; row < rowsCount; row++) {
-      matrix[row][colIdx] = values[row][0];
+      for (let c = 0; c < group.headers.length; c++) {
+        matrix[row][group.sourceIndexes[c]] = values[row][c];
+      }
     }
   }
   return matrix;
 }
 
 function writeColumnsByHeaders_(sheet, colMap, targetHeaders, values) {
-  for (let colOffset = 0; colOffset < targetHeaders.length; colOffset++) {
-    const colName = targetHeaders[colOffset];
-    const singleColumn = new Array(values.length);
+  const groups = buildColumnGroups_(colMap, targetHeaders);
+  for (let g = 0; g < groups.length; g++) {
+    const group = groups[g];
+    const blockValues = new Array(values.length);
     for (let row = 0; row < values.length; row++) {
-      singleColumn[row] = [values[row][colOffset]];
+      const outRow = new Array(group.headers.length);
+      for (let c = 0; c < group.headers.length; c++) {
+        outRow[c] = values[row][group.sourceIndexes[c]];
+      }
+      blockValues[row] = outRow;
     }
-    sheet.getRange(2, colMap[colName] + 1, values.length, 1).setValues(singleColumn);
+    sheet.getRange(2, group.startCol + 1, values.length, group.headers.length).setValues(blockValues);
   }
 }
 
 function freezeColumnsAsValues_(sheet, rowsCount, colMap, targetHeaders) {
-  for (let colOffset = 0; colOffset < targetHeaders.length; colOffset++) {
-    const colName = targetHeaders[colOffset];
-    const range = sheet.getRange(2, colMap[colName] + 1, rowsCount, 1);
-    const values = range.getValues();
-    range.setValues(values);
+  const groups = buildColumnGroups_(colMap, targetHeaders);
+  for (let g = 0; g < groups.length; g++) {
+    const group = groups[g];
+    const range = sheet.getRange(2, group.startCol + 1, rowsCount, group.headers.length);
+    range.setValues(range.getValues());
   }
+}
+
+function buildColumnGroups_(colMap, headers) {
+  const columns = headers.map(function(header, sourceIndex) {
+    return {
+      header: header,
+      sourceIndex: sourceIndex,
+      col: colMap[header]
+    };
+  }).sort(function(a, b) { return a.col - b.col; });
+
+  const groups = [];
+  let current = null;
+
+  for (let i = 0; i < columns.length; i++) {
+    const item = columns[i];
+    if (!current || item.col !== current.lastCol + 1) {
+      if (current) groups.push(current);
+      current = {
+        startCol: item.col,
+        lastCol: item.col,
+        headers: [item.header],
+        sourceIndexes: [item.sourceIndex]
+      };
+    } else {
+      current.lastCol = item.col;
+      current.headers.push(item.header);
+      current.sourceIndexes.push(item.sourceIndex);
+    }
+  }
+
+  if (current) groups.push(current);
+  return groups;
 }
 
 // НОВАЯ ЗАГРУЗКА БАЗЫ (Поиск по тегам на множестве листов + Удаление дублей)
@@ -430,23 +471,73 @@ function insertReplicatedData(valuesArray, targetCellA1) {
  * @customfunction
  */
 function CALC_SPEC(ids, n_vals, l_vals, q_matrix, spec_all_data) {
-  if (!ids || !spec_all_data) return "Нет данных";
+  if (!ids || !spec_all_data || spec_all_data.length < 1) return "Нет данных";
 
-  const headers = spec_all_data[0];
-  const col_id = headers.indexOf("ID СПЯ");
-  const col_type = headers.indexOf("Тип");
-  const col_itog = headers.indexOf("Итог");
-  
-  const col_prices = ["Цена закупки 1", "Цена закупки 2", "Цена закупки 3", "Цена закупки 4", "Цена закупки 5"].map(n => headers.indexOf(n));
-  const col_qs = ["Кол-во 1", "Кол-во 2", "Кол-во 3", "Кол-во 4", "Кол-во 5"].map(n => headers.indexOf(n));
+  // 1) Находим строку заголовков по маркеру "ID СПЯ"
+  let headerRowIndex = -1;
+  let headers = [];
+  for (let i = 0; i < spec_all_data.length; i++) {
+    const rowClean = spec_all_data[i].map(normalizeHeader_);
+    if (rowClean.indexOf("id спя") !== -1) {
+      headerRowIndex = i;
+      headers = rowClean;
+      break;
+    }
+  }
 
-  // 1. Хешируем базу СПЯ за один проход
+  let isHeaderFound = true;
+  if (headerRowIndex === -1) {
+    headerRowIndex = 0;
+    headers = spec_all_data[0].map(normalizeHeader_);
+    isHeaderFound = false;
+  }
+
+  let col_id = headers.indexOf("id спя");
+  let col_type = headers.indexOf("тип");
+  let col_itog = headers.indexOf("итог");
+  let col_prices = [
+    "цена закупки 1",
+    "цена закупки 2",
+    "цена закупки 3",
+    "цена закупки 4",
+    "цена закупки 5"
+  ].map(function(n) { return headers.indexOf(n); });
+  let col_qs = [
+    "кол-во 1",
+    "кол-во 2",
+    "кол-во 3",
+    "кол-во 4",
+    "кол-во 5"
+  ].map(function(n) { return headers.indexOf(n); });
+
+  // Резервная схема индексов на случай нестандартной/сдвинутой шапки
+  const hasMissingColumns = (
+    col_id === -1 || col_type === -1 || col_itog === -1 ||
+    col_prices.some(function(idx) { return idx === -1; }) ||
+    col_qs.some(function(idx) { return idx === -1; })
+  );
+  if (!isHeaderFound || hasMissingColumns) {
+    col_id = 2;      // ID СПЯ
+    col_type = 6;    // Тип
+    col_itog = 11;   // Итог
+    col_prices = [13, 14, 15, 16, 17]; // Цена закупки 1..5
+    col_qs = [18, 19, 20, 21, 22];     // Кол-во 1..5
+  }
+
+  const normalizeSpecId = function(str) {
+    return String(str).replace(/\s+/g, '').toLowerCase()
+      .replace(/х/g, 'x').replace(/с/g, 'c').replace(/а/g, 'a').replace(/е/g, 'e').replace(/о/g, 'o');
+  };
+
+  // 2. Хешируем базу СПЯ за один проход
   const specMap = new Map();
   const dataLen = spec_all_data.length;
+  const startRow = isHeaderFound ? headerRowIndex + 1 : 0;
   
-  for (let i = 1; i < dataLen; i++) {
+  for (let i = startRow; i < dataLen; i++) {
     const r = spec_all_data[i];
-    const id = String(r[col_id]).trim();
+    if (!r || r.length === 0) continue;
+    const id = normalizeSpecId(r[col_id]);
     if (!id) continue;
     
     const t = String(r[col_type]).toLowerCase();
@@ -467,28 +558,35 @@ function CALC_SPEC(ids, n_vals, l_vals, q_matrix, spec_all_data) {
       q: col_qs.map(idx => parseFloat(String(r[idx]).replace(',', '.')) || 0)
     });
   }
+  if (specMap.size === 0) {
+    return "ОШИБКА CALC_SPEC: база ТВР.СПЯ не распознана (проверьте заголовки/данные ID СПЯ).";
+  }
 
   // Заранее парсим N и L в плоские массивы чисел
   const rowsCount = ids.length;
   const parsedN = new Float64Array(rowsCount);
   const parsedL = new Float64Array(rowsCount);
   const cleanIds = new Array(rowsCount);
+  let nonEmptyIds = 0;
 
   for (let i = 0; i < rowsCount; i++) {
-    cleanIds[i] = String(ids[i][0]).trim();
+    cleanIds[i] = normalizeSpecId(ids[i][0]);
     parsedN[i] = parseFloat(String(n_vals[i][0]).replace(',', '.')) || 1;
     parsedL[i] = parseFloat(String(l_vals[i][0]).replace(',', '.')) || 1;
+    if (cleanIds[i]) nonEmptyIds++;
   }
 
   const result = new Array(rowsCount);
+  let matchedRows = 0;
 
-  // 2. Главный расчет на быстрых циклах for
+  // 3. Главный расчет на быстрых циклах for
   for (let rIdx = 0; rIdx < rowsCount; rIdx++) {
     const id = cleanIds[rIdx];
     if (!id || !specMap.has(id)) {
       result[rIdx] = [0, 0, 0, 0, 0];
       continue;
     }
+    matchedRows++;
 
     const N = parsedN[rIdx];
     const L = parsedL[rIdx];
@@ -500,7 +598,7 @@ function CALC_SPEC(ids, n_vals, l_vals, q_matrix, spec_all_data) {
     const rowResult = new Array(qsLen);
 
     for (let qIdx = 0; qIdx < qsLen; qIdx++) {
-      const orderQ = parseFloat(rowQs[qIdx]) || 0;
+      const orderQ = parseFloat(String(rowQs[qIdx]).replace(',', '.')) || 0;
       let totalRowCost = 0;
 
       for (let i = 0; i < itemsLen; i++) {
@@ -534,6 +632,9 @@ function CALC_SPEC(ids, n_vals, l_vals, q_matrix, spec_all_data) {
     }
     
     result[rIdx] = rowResult;
+  }
+  if (nonEmptyIds > 0 && matchedRows === 0) {
+    return "ОШИБКА CALC_SPEC: ID СПЯ из ТВР.ЛИСТ не совпали с ТВР.СПЯ.";
   }
 
   return result;
