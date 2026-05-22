@@ -5,6 +5,14 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('⚙️ Инструменты БД')
     .addItem('🔍 Открыть панель сборщика', 'showSidebar')
     .addToUi();
+
+  SpreadsheetApp.getUi().createMenu('🧮 Пересчет ТВР')
+    .addItem('📋 Открыть панель пересчета', 'openTvrRecalcControlSheet')
+    .addSeparator()
+    .addItem('⏱️ Пересчитать время и стоимость работ', 'recalcTvrLaborColumns')
+    .addItem('🧩 Пересчитать стоимость компонентной базы К1-К5', 'recalcTvrSpecColumns')
+    .addItem('✅ Пересчитать все колонки ТВР.ЛИСТ', 'recalcTvrAllColumns')
+    .addToUi();
 }
 
 function showSidebar() {
@@ -12,6 +20,249 @@ function showSidebar() {
     .setTitle('Сборщик спецификаций')
     .setWidth(320); 
   SpreadsheetApp.getUi().showSidebar(html);
+}
+
+const TVR_CONTROL_SHEET = 'ТВР.УПРАВЛЕНИЕ';
+
+function openTvrRecalcControlSheet() {
+  const controlSheet = ensureTvrRecalcControlSheet_();
+  controlSheet.activate();
+}
+
+function recalcTvrAllColumns() {
+  const startedAt = new Date();
+  try {
+    const rates = readManualRates_();
+    const laborRows = recalcTvrLaborColumnsCore_(rates.rateCh, rates.rateMag);
+    const specRows = recalcTvrSpecColumnsCore_();
+    const message = 'Пересчет завершен. Трудоемкость: ' + laborRows + ' строк, компонентная база: ' + specRows + ' строк.';
+    writeControlStatus_(message, startedAt);
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Пересчет ТВР', 8);
+    return message;
+  } catch (error) {
+    writeControlStatus_('Ошибка: ' + error.message, startedAt);
+    throw error;
+  }
+}
+
+function recalcTvrLaborColumns() {
+  const startedAt = new Date();
+  try {
+    const rates = readManualRates_();
+    const rows = recalcTvrLaborColumnsCore_(rates.rateCh, rates.rateMag);
+    const message = 'Пересчет трудоемкости завершен: ' + rows + ' строк.';
+    writeControlStatus_(message, startedAt);
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Пересчет ТВР', 8);
+    return message;
+  } catch (error) {
+    writeControlStatus_('Ошибка: ' + error.message, startedAt);
+    throw error;
+  }
+}
+
+function recalcTvrSpecColumns() {
+  const startedAt = new Date();
+  try {
+    const rows = recalcTvrSpecColumnsCore_();
+    const message = 'Пересчет компонентной базы завершен: ' + rows + ' строк.';
+    writeControlStatus_(message, startedAt);
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Пересчет ТВР', 8);
+    return message;
+  } catch (error) {
+    writeControlStatus_('Ошибка: ' + error.message, startedAt);
+    throw error;
+  }
+}
+
+function recalcTvrLaborColumnsCore_(rateCh, rateMag) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const listSheet = requireSheet_(ss, 'ТВР.ЛИСТ');
+  const bdopSheet = requireSheet_(ss, 'ТВР.БДОП');
+  const rowsCount = Math.max(listSheet.getLastRow() - 1, 0);
+  if (rowsCount === 0) return 0;
+
+  const headerRow = listSheet.getRange(1, 1, 1, listSheet.getLastColumn()).getValues()[0];
+  const listCols = mapRequiredColumns_(headerRow, [
+    'ID Техкарты',
+    'N',
+    'L',
+    'Время подготовки',
+    'Время производства',
+    'Цена подготовительных работ',
+    'Цена работы',
+    'Цена работы_маг'
+  ]);
+
+  const techIds = listSheet.getRange(2, listCols['ID Техкарты'] + 1, rowsCount, 1).getValues();
+  const nVals = listSheet.getRange(2, listCols['N'] + 1, rowsCount, 1).getValues();
+  const lVals = listSheet.getRange(2, listCols['L'] + 1, rowsCount, 1).getValues();
+  const bdopData = bdopSheet.getDataRange().getValues();
+
+  const result = CALC_LABOR(techIds, nVals, lVals, rateCh, rateMag, bdopData);
+  if (!Array.isArray(result)) {
+    throw new Error('CALC_LABOR вернул ошибку: ' + result);
+  }
+  if (result.length !== rowsCount) {
+    throw new Error('CALC_LABOR вернул некорректное количество строк: ' + result.length + ' вместо ' + rowsCount);
+  }
+
+  writeColumnsByHeaders_(listSheet, listCols, [
+    'Время подготовки',
+    'Время производства',
+    'Цена подготовительных работ',
+    'Цена работы',
+    'Цена работы_маг'
+  ], result);
+
+  return rowsCount;
+}
+
+function recalcTvrSpecColumnsCore_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const listSheet = requireSheet_(ss, 'ТВР.ЛИСТ');
+  const specSheet = requireSheet_(ss, 'ТВР.СПЯ');
+  const rowsCount = Math.max(listSheet.getLastRow() - 1, 0);
+  if (rowsCount === 0) return 0;
+
+  const headerRow = listSheet.getRange(1, 1, 1, listSheet.getLastColumn()).getValues()[0];
+  const listCols = mapRequiredColumns_(headerRow, [
+    'ID СПЯ',
+    'N',
+    'L',
+    'Кол-во 1',
+    'Кол-во 2',
+    'Кол-во 3',
+    'Кол-во 4',
+    'Кол-во 5',
+    'Стоимость компонентной базы К1',
+    'Стоимость компонентной базы К2',
+    'Стоимость компонентной базы К3',
+    'Стоимость компонентной базы К4',
+    'Стоимость компонентной базы К5'
+  ]);
+
+  const specIds = listSheet.getRange(2, listCols['ID СПЯ'] + 1, rowsCount, 1).getValues();
+  const nVals = listSheet.getRange(2, listCols['N'] + 1, rowsCount, 1).getValues();
+  const lVals = listSheet.getRange(2, listCols['L'] + 1, rowsCount, 1).getValues();
+  const qMatrix = extractMatrixByHeaders_(listSheet, rowsCount, listCols, [
+    'Кол-во 1',
+    'Кол-во 2',
+    'Кол-во 3',
+    'Кол-во 4',
+    'Кол-во 5'
+  ]);
+  const specData = specSheet.getDataRange().getValues();
+
+  const result = CALC_SPEC(specIds, nVals, lVals, qMatrix, specData);
+  if (!Array.isArray(result)) {
+    throw new Error('CALC_SPEC вернул ошибку: ' + result);
+  }
+  if (result.length !== rowsCount) {
+    throw new Error('CALC_SPEC вернул некорректное количество строк: ' + result.length + ' вместо ' + rowsCount);
+  }
+
+  writeColumnsByHeaders_(listSheet, listCols, [
+    'Стоимость компонентной базы К1',
+    'Стоимость компонентной базы К2',
+    'Стоимость компонентной базы К3',
+    'Стоимость компонентной базы К4',
+    'Стоимость компонентной базы К5'
+  ], result);
+
+  return rowsCount;
+}
+
+function ensureTvrRecalcControlSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(TVR_CONTROL_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(TVR_CONTROL_SHEET);
+    sheet.getRange('A1').setValue('Панель управляемого пересчета ТВР.ЛИСТ');
+    sheet.getRange('A3').setValue('Ставка ЧЛ (0 = взять Уд.Цена ЧЛ из ТВР.БДОП)');
+    sheet.getRange('A4').setValue('Ставка ЧЛ_МАГ (0 = взять Уд.Цена ЧЛ_МАГ из ТВР.БДОП)');
+    sheet.getRange('A6').setValue('Запуск: меню "🧮 Пересчет ТВР"');
+    sheet.getRange('A8').setValue('Последний статус');
+    sheet.getRange('B3').setValue(0);
+    sheet.getRange('B4').setValue(0);
+    sheet.setColumnWidths(1, 2, 500);
+    sheet.getRange('A1:A8').setFontWeight('bold');
+  }
+  return sheet;
+}
+
+function readManualRates_() {
+  const controlSheet = ensureTvrRecalcControlSheet_();
+  return {
+    rateCh: parseNumber_(controlSheet.getRange('B3').getValue(), 0),
+    rateMag: parseNumber_(controlSheet.getRange('B4').getValue(), 0)
+  };
+}
+
+function writeControlStatus_(status, startedAt) {
+  const controlSheet = ensureTvrRecalcControlSheet_();
+  const finishedAt = new Date();
+  const elapsedSec = ((finishedAt.getTime() - startedAt.getTime()) / 1000).toFixed(1);
+  controlSheet.getRange('A9').setValue('Время запуска');
+  controlSheet.getRange('B9').setValue(startedAt);
+  controlSheet.getRange('A10').setValue('Время завершения');
+  controlSheet.getRange('B10').setValue(finishedAt);
+  controlSheet.getRange('A11').setValue('Длительность, сек');
+  controlSheet.getRange('B11').setValue(elapsedSec);
+  controlSheet.getRange('B8').setValue(status);
+}
+
+function requireSheet_(spreadsheet, sheetName) {
+  const sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) throw new Error('Лист не найден: ' + sheetName);
+  return sheet;
+}
+
+function normalizeHeader_(value) {
+  return String(value || '').toLowerCase().replace(/["']/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function parseNumber_(value, fallback) {
+  const parsed = parseFloat(String(value).replace(',', '.'));
+  return isNaN(parsed) ? fallback : parsed;
+}
+
+function mapRequiredColumns_(headerRow, requiredHeaders) {
+  const normalizedMap = new Map();
+  for (let i = 0; i < headerRow.length; i++) {
+    normalizedMap.set(normalizeHeader_(headerRow[i]), i);
+  }
+  const output = {};
+  for (let i = 0; i < requiredHeaders.length; i++) {
+    const key = requiredHeaders[i];
+    const idx = normalizedMap.get(normalizeHeader_(key));
+    if (idx === undefined) throw new Error('Колонка не найдена: ' + key);
+    output[key] = idx;
+  }
+  return output;
+}
+
+function extractMatrixByHeaders_(sheet, rowsCount, colMap, headers) {
+  const matrix = new Array(rowsCount);
+  for (let row = 0; row < rowsCount; row++) matrix[row] = new Array(headers.length);
+  for (let colIdx = 0; colIdx < headers.length; colIdx++) {
+    const colName = headers[colIdx];
+    const values = sheet.getRange(2, colMap[colName] + 1, rowsCount, 1).getValues();
+    for (let row = 0; row < rowsCount; row++) {
+      matrix[row][colIdx] = values[row][0];
+    }
+  }
+  return matrix;
+}
+
+function writeColumnsByHeaders_(sheet, colMap, targetHeaders, values) {
+  for (let colOffset = 0; colOffset < targetHeaders.length; colOffset++) {
+    const colName = targetHeaders[colOffset];
+    const singleColumn = new Array(values.length);
+    for (let row = 0; row < values.length; row++) {
+      singleColumn[row] = [values[row][colOffset]];
+    }
+    sheet.getRange(2, colMap[colName] + 1, values.length, 1).setValues(singleColumn);
+  }
 }
 
 // НОВАЯ ЗАГРУЗКА БАЗЫ (Поиск по тегам на множестве листов + Удаление дублей)
@@ -234,9 +485,16 @@ function CALC_SPEC(ids, n_vals, l_vals, q_matrix, spec_all_data) {
 function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) {
   if (!tech_ids || !bdop_all_data || bdop_all_data.length < 1) return "Нет данных";
 
-  const cleanHeader = (str) => {
-    return String(str).toLowerCase().replace(/["']/g, '').replace(/\s+/g, ' ').trim();
+  const parseScalarRate = (value) => {
+    if (Array.isArray(value)) {
+      const first = Array.isArray(value[0]) ? value[0][0] : value[0];
+      return parseFloat(String(first).replace(',', '.')) || 0;
+    }
+    return parseFloat(String(value).replace(',', '.')) || 0;
   };
+
+  const externalRateCh = parseScalarRate(rate_ch);
+  const externalRateMag = parseScalarRate(rate_mag);
 
   // 1. Поиск строки заголовков по ключевому маркеру
   let headerRowIndex = -1;
@@ -244,7 +502,7 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
   const bdopLen = bdop_all_data.length;
   
   for (let i = 0; i < bdopLen; i++) {
-    const rowClean = bdop_all_data[i].map(cleanHeader);
+    const rowClean = bdop_all_data[i].map(normalizeHeader_);
     if (rowClean.indexOf("id техкарты") !== -1) {
       headerRowIndex = i;
       headers = rowClean;
@@ -255,7 +513,7 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
   let isHeaderFound = true;
   if (headerRowIndex === -1) {
     headerRowIndex = 0; 
-    headers = bdop_all_data[0].map(cleanHeader);
+    headers = bdop_all_data[0].map(normalizeHeader_);
     isHeaderFound = false;
   }
   
@@ -269,6 +527,8 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
     p_ch: headers.indexOf("уд.цена чл, сек"),
     p_mag: headers.indexOf("уд.цена чл_маг, сек"),
     p_msh: headers.indexOf("уд.цена мш, сек"),
+    n_per_product: headers.indexOf("кол-во операций на продукцию"),
+    operators: headers.indexOf("кол-во операторов"),
     // Погонные параметры
     v_prokat: headers.indexOf("скорость проката"),
     v_tool: headers.indexOf("скорость работы инструмента"),
@@ -288,6 +548,8 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
     col.p_ch = 20;    // Уд.Цена ЧЛ, сек
     col.p_mag = 21;   // Уд.Цена ЧЛ_МАГ, сек
     col.p_msh = 22;   // Уд.Цена МШ, сек
+    col.n_per_product = 7; // Кол-во операций на продукцию
+    col.operators = 8;     // Кол-во операторов
     col.type = 23;    // Тип операции
     col.h_take = 24;  // Время ручных работ для взятия...
     col.h_work = 25;  // Время ручных работ
@@ -330,6 +592,8 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
     const p_ch = col.p_ch < r.length ? (parseFloat(String(r[col.p_ch]).replace(',', '.')) || 0) : 0;
     const p_mag = col.p_mag < r.length ? (parseFloat(String(r[col.p_mag]).replace(',', '.')) || 0) : 0;
     const p_msh = col.p_msh < r.length ? (parseFloat(String(r[col.p_msh]).replace(',', '.')) || 0) : 0;
+    const n_per_product = col.n_per_product < r.length ? (parseFloat(String(r[col.n_per_product]).replace(',', '.')) || 1) : 1;
+    const operators = col.operators < r.length ? (parseFloat(String(r[col.operators]).replace(',', '.')) || 1) : 1;
 
     // Параметры для погонного расчета
     const v_prokat = col.v_prokat < r.length ? (parseFloat(String(r[col.v_prokat]).replace(',', '.')) || 0) : 0;
@@ -358,6 +622,8 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
       p_ch: p_ch,
       p_mag: p_mag,
       p_msh: p_msh,
+      n_per_product: n_per_product,
+      operators: operators,
       v_prokat: v_prokat,
       v_tool: v_tool,
       n_tool: n_tool,
@@ -395,46 +661,25 @@ function CALC_LABOR(tech_ids, n_vals, l_vals, rate_ch, rate_mag, bdop_all_data) 
       const op = card.operations[j];
       
       // Назначение тарифных ставок (с приоритетом внешних параметров листа)
-      const current_rate_ch = rate_ch > 0 ? rate_ch : op.p_ch;
-      const current_rate_mag = rate_mag > 0 ? rate_mag : op.p_mag;
+      const current_rate_ch = externalRateCh > 0 ? externalRateCh : op.p_ch;
+      const current_rate_mag = externalRateMag > 0 ? externalRateMag : op.p_mag;
+      const operationsPerProduct = op.n_per_product > 0 ? op.n_per_product : 1;
+      const operatorsCount = op.operators > 0 ? op.operators : 1;
+      let op_time = 0;
 
       if (op.type === "погоннный" || op.type === "погонный") {
-        // --- 1. ПОГОННАЯ ОПЕРАЦИЯ ---
-        // Время = (L * Скорость проката + Скорость инструмента * Кол-во операций) * N
-        const pogon_time = (L * op.v_prokat + op.v_tool * op.n_tool) * N;
-        total_prod_time += pogon_time;
-
-        // Цена = Время * Тариф_ЧЛ + Время * Уд.Цена МШ
-        price_work += (pogon_time * current_rate_ch) + (pogon_time * op.p_msh);
-        price_work_mag += (pogon_time * current_rate_mag) + (pogon_time * op.p_msh);
-
-      } else if (op.type === "переменный") {
-        // --- 2. ПЕРЕМЕННАЯ ОПЕРАЦИЯ ---
-        // Общее время = (Сумма ручных работ * N) + (Время машины * N)
-        const perm_human_time = op.sum_manual * N;
-        const perm_mach_time = op.t_mach * N;
-        total_prod_time += (perm_human_time + perm_mach_time);
-
-        // Цена на тираж = (Время Операции * Тариф_ЧЛ + Время Машины * Уд.Цена МШ) * N
-        const base_cost_ch = (op.t_op * current_rate_ch) + (op.t_mach * op.p_msh);
-        const base_cost_mag = (op.t_op * current_rate_mag) + (op.t_mach * op.p_msh);
-        
-        price_work += base_cost_ch * N;
-        price_work_mag += base_cost_mag * N;
-
+        op_time = ((op.v_prokat * L) + (op.v_tool * op.n_tool)) * N * operationsPerProduct;
       } else {
-        // --- 3. СТАТИЧНАЯ ОПЕРАЦИЯ ---
-        // Общее время = Сумма ручных работ + Время машины (1 раз на партию)
-        total_prod_time += (op.sum_manual + op.t_mach);
-
-        // Цена статичной операции берется 1 раз на партию (не умножается на N)
-        price_work += (op.t_op * current_rate_ch) + (op.t_mach * op.p_msh);
-        price_work_mag += (op.t_op * current_rate_mag) + (op.t_mach * op.p_msh);
+        op_time = op.sum_manual * N * operationsPerProduct;
       }
+
+      total_prod_time += op_time;
+      price_work += op_time * (current_rate_ch + op.p_msh) * operatorsCount;
+      price_work_mag += op_time * (current_rate_mag + op.p_msh) * operatorsCount;
     }
 
     // Итоговая цена подготовки
-    const current_prep_rate = rate_ch > 0 ? rate_ch : (card.operations[0]?.p_ch || 0);
+    const current_prep_rate = externalRateCh > 0 ? externalRateCh : (card.operations[0]?.p_ch || 0);
     const price_prep = card.total_prep_time * current_prep_rate;
 
     result[i] = [
