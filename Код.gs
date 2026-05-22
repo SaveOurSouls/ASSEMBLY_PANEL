@@ -12,6 +12,8 @@ function onOpen() {
     .addItem('⏱️ Пересчитать время и стоимость работ', 'recalcTvrLaborColumns')
     .addItem('🧩 Пересчитать стоимость компонентной базы К1-К5', 'recalcTvrSpecColumns')
     .addItem('✅ Пересчитать все колонки ТВР.ЛИСТ', 'recalcTvrAllColumns')
+    .addSeparator()
+    .addItem('🚚 Миграция: зафиксировать расчетные колонки значениями', 'migrateTvrCalculatedColumnsToValues')
     .addToUi();
 }
 
@@ -65,6 +67,57 @@ function recalcTvrSpecColumns() {
   try {
     const rows = recalcTvrSpecColumnsCore_();
     const message = 'Пересчет компонентной базы завершен: ' + rows + ' строк.';
+    writeControlStatus_(message, startedAt);
+    SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Пересчет ТВР', 8);
+    return message;
+  } catch (error) {
+    writeControlStatus_('Ошибка: ' + error.message, startedAt);
+    throw error;
+  }
+}
+
+function migrateTvrCalculatedColumnsToValues() {
+  const startedAt = new Date();
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const listSheet = requireSheet_(ss, 'ТВР.ЛИСТ');
+    const rowsCount = Math.max(listSheet.getLastRow() - 1, 0);
+    if (rowsCount === 0) {
+      const emptyMessage = 'Миграция не требуется: в ТВР.ЛИСТ нет строк данных.';
+      writeControlStatus_(emptyMessage, startedAt);
+      SpreadsheetApp.getActiveSpreadsheet().toast(emptyMessage, 'Пересчет ТВР', 8);
+      return emptyMessage;
+    }
+
+    const headerRow = listSheet.getRange(1, 1, 1, listSheet.getLastColumn()).getValues()[0];
+    const listCols = mapRequiredColumns_(headerRow, [
+      'Время подготовки',
+      'Время производства',
+      'Цена подготовительных работ',
+      'Цена работы',
+      'Цена работы_маг',
+      'Стоимость компонентной базы К1',
+      'Стоимость компонентной базы К2',
+      'Стоимость компонентной базы К3',
+      'Стоимость компонентной базы К4',
+      'Стоимость компонентной базы К5'
+    ]);
+
+    SpreadsheetApp.flush();
+    freezeColumnsAsValues_(listSheet, rowsCount, listCols, [
+      'Время подготовки',
+      'Время производства',
+      'Цена подготовительных работ',
+      'Цена работы',
+      'Цена работы_маг',
+      'Стоимость компонентной базы К1',
+      'Стоимость компонентной базы К2',
+      'Стоимость компонентной базы К3',
+      'Стоимость компонентной базы К4',
+      'Стоимость компонентной базы К5'
+    ]);
+
+    const message = 'Миграция завершена: расчетные колонки ТВР.ЛИСТ переведены в значения (' + rowsCount + ' строк).';
     writeControlStatus_(message, startedAt);
     SpreadsheetApp.getActiveSpreadsheet().toast(message, 'Пересчет ТВР', 8);
     return message;
@@ -262,6 +315,15 @@ function writeColumnsByHeaders_(sheet, colMap, targetHeaders, values) {
       singleColumn[row] = [values[row][colOffset]];
     }
     sheet.getRange(2, colMap[colName] + 1, values.length, 1).setValues(singleColumn);
+  }
+}
+
+function freezeColumnsAsValues_(sheet, rowsCount, colMap, targetHeaders) {
+  for (let colOffset = 0; colOffset < targetHeaders.length; colOffset++) {
+    const colName = targetHeaders[colOffset];
+    const range = sheet.getRange(2, colMap[colName] + 1, rowsCount, 1);
+    const values = range.getValues();
+    range.setValues(values);
   }
 }
 
